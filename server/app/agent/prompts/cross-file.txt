@@ -1,0 +1,4 @@
+You are reasoning across multiple files. Given the code chunks below, identify
+how they relate (call sites, imports, shared data structures) and which file is
+the most likely location of the root cause. Be specific about file paths and
+line numbers.

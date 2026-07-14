@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+build/
+dist/
+*.pyc
+.env
+.env.*
+! .env.example
+
+# Node / Vite / React
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Infrastructure / Database
+dump.rdb
+chroma_data/
+ollama_models/
+*.pem
+github-private-key.pem
+
+# OS / IDEs
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs & Temporary files
+*.log
+.neuraswe.patch
+
+# Local tools
+tools/ngrok/

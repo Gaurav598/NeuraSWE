@@ -1,0 +1,41 @@
+# --- Web framework / API ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-socketio==5.11.2
+python-multipart==0.0.9
+
+# --- Validation / settings ---
+pydantic==2.7.4
+pydantic-settings==2.3.4
+
+# --- Database ---
+SQLAlchemy[asyncio]==2.0.31
+asyncpg==0.29.0
+alembic==1.13.2
+greenlet==3.0.3
+
+# --- Queue ---
+arq==0.26.0
+redis==4.6.0
+
+# --- LLM / RAG ---
+httpx==0.27.0
+chromadb==0.4.24
+numpy<2
+tiktoken==0.7.0
+
+# --- Sandbox ---
+docker==7.1.0
+
+# --- GitHub ---
+PyJWT[crypto]==2.8.0
+cryptography==42.0.8
+
+# --- Utils ---
+python-dotenv==1.0.1
+structlog==24.2.0
+tenacity==8.4.2
+
+# --- Tests ---
+pytest==8.2.2
+pytest-asyncio==0.23.7

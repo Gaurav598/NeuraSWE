@@ -1,0 +1,140 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: neuraswe
+      POSTGRES_PASSWORD: neuraswe
+      POSTGRES_DB: neuraswe
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neuraswe"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  chromadb:
+    image: chromadb/chroma:0.4.24
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadata:/chroma/chroma
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    # Load EVERY var from .env (GEMINI_API_KEY, GROQ_API_KEY, LLM_FALLBACK_ENABLED,
+    # AGENT_* tuning, etc.). The explicit `environment:` block below overrides the
+    # connection URLs so they point at the in-network service hostnames.
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://neuraswe:neuraswe@postgres:5432/neuraswe
+      REDIS_URL: redis://redis:6379
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-2}
+      WORKER_JOB_TIMEOUT_S: ${WORKER_JOB_TIMEOUT_S:-900}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai-compatible}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-llama-3.3-70b-versatile}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-180}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-deepseek-coder-v2:16b}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_EMBED_CONCURRENCY: ${OLLAMA_EMBED_CONCURRENCY:-1}
+      OLLAMA_TIMEOUT_S: ${OLLAMA_TIMEOUT_S:-180}
+      CHROMA_URL: http://chromadb:8000
+      CORS_ORIGINS: http://localhost:5173
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+      GITHUB_DEFAULT_BASE_BRANCH: ${GITHUB_DEFAULT_BASE_BRANCH:-main}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-neuraswe-sandbox:latest}
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-2048}
+      SANDBOX_CPU_CORES: ${SANDBOX_CPU_CORES:-1}
+      SANDBOX_WORKDIR: ${SANDBOX_WORKDIR:-/workspace}
+      SANDBOX_USE_LOCAL: ${SANDBOX_USE_LOCAL:-false}
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      chromadb:
+        condition: service_started
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # sibling sandbox containers
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 3001"
+
+  worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    # Same as the server: pull the full .env so the fallback chain + agent
+    # tuning reach the worker process that actually runs the agent loop.
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://neuraswe:neuraswe@postgres:5432/neuraswe
+      REDIS_URL: redis://redis:6379
+      WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-2}
+      WORKER_JOB_TIMEOUT_S: ${WORKER_JOB_TIMEOUT_S:-900}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai-compatible}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-llama-3.3-70b-versatile}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-180}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-deepseek-coder-v2:16b}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_EMBED_CONCURRENCY: ${OLLAMA_EMBED_CONCURRENCY:-1}
+      OLLAMA_TIMEOUT_S: ${OLLAMA_TIMEOUT_S:-180}
+      CHROMA_URL: http://chromadb:8000
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+      GITHUB_DEFAULT_BASE_BRANCH: ${GITHUB_DEFAULT_BASE_BRANCH:-main}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-neuraswe-sandbox:latest}
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-2048}
+      SANDBOX_CPU_CORES: ${SANDBOX_CPU_CORES:-1}
+      SANDBOX_WORKDIR: ${SANDBOX_WORKDIR:-/workspace}
+      SANDBOX_USE_LOCAL: ${SANDBOX_USE_LOCAL:-false}
+      NODE_ENV: production
+    depends_on:
+      - server
+      - redis
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: arq app.queue.worker.WorkerSettings
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
+  chromadata:
+  ollama_data:

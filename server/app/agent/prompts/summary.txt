@@ -1,0 +1,4 @@
+Summarize the following agent exploration steps into ONE short paragraph.
+Preserve concrete facts the agent will need later: file paths, line numbers,
+function names, the root-cause hypothesis, and what has been tried. Omit
+narration and tool mechanics. Be dense and factual.
