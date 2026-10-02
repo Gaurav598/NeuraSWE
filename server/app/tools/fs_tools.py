@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
-from app.tools.base import Tool, ToolContext, ToolResult
+from app.tools.base import Tool, ToolContext, ToolPermission, ToolResult
 
 MAX_FILE_LINES = 200
 
@@ -15,21 +15,23 @@ class ReadFileTool(Tool):
     description = (
         "Read a file's contents. Optionally specify start_line and end_line for large files."
     )
+    argument_types = {"path": str, "start_line": int, "end_line": int}
+    required_arguments = {"path"}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         path = self._require(args, "path")
+        ctx.sandbox.validate_path(path)
         start = args.get("start_line")
         end = args.get("end_line")
+        try:
+            content = await ctx.sandbox.read_file(path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return ToolResult(error=f"Could not read {path}: {exc}")
         if start and end:
-            res = await ctx.sandbox.exec(f"sed -n '{int(start)},{int(end)}p' {shlex.quote(path)}")
-            if not res.ok:
-                return ToolResult(error=res.stderr.strip() or f"Could not read {path}")
-            return ToolResult(output=res.stdout)
+            lines = content.splitlines()
+            return ToolResult(output="\n".join(lines[max(0, start - 1):end]))
 
-        res = await ctx.sandbox.exec(f"cat {shlex.quote(path)}")
-        if not res.ok:
-            return ToolResult(error=res.stderr.strip() or f"Could not read {path}")
-        lines = res.stdout.split("\n")
+        lines = content.split("\n")
         if len(lines) > MAX_FILE_LINES:
             shown = "\n".join(lines[:MAX_FILE_LINES])
             shown += (
@@ -40,15 +42,17 @@ class ReadFileTool(Tool):
                 output=shown,
                 metadata={"truncated": True, "total_lines": len(lines)},
             )
-        return ToolResult(output=res.stdout)
+        return ToolResult(output=content)
 
 
 class ListDirectoryTool(Tool):
     name = "list_directory"
     description = "List files and subdirectories (depth 2), skipping node_modules and .git."
+    argument_types = {"path": str}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         path = args.get("path", ".")
+        ctx.sandbox.validate_path(path)
         cmd = (
             f"find {shlex.quote(path)} -maxdepth 2 "
             "-not -path '*/node_modules/*' -not -path '*/.git/*' "
@@ -66,9 +70,13 @@ class EditFileTool(Tool):
         "Replace exact text in a file. old_text must appear exactly once. "
         "Read the file first to copy exact content."
     )
+    permission = ToolPermission.WORKSPACE_WRITE
+    argument_types = {"path": str, "old_text": str, "new_text": str}
+    required_arguments = {"path", "old_text"}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         path = self._require(args, "path")
+        ctx.sandbox.validate_path(path, for_write=True)
         old_text = self._require(args, "old_text")
         new_text = args.get("new_text", "")
 
@@ -96,9 +104,13 @@ class EditFileTool(Tool):
 class CreateFileTool(Tool):
     name = "create_file"
     description = "Create a new file with the given content. Fails if the file already exists."
+    permission = ToolPermission.WORKSPACE_WRITE
+    argument_types = {"path": str, "content": str}
+    required_arguments = {"path"}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         path = self._require(args, "path")
+        ctx.sandbox.validate_path(path, for_write=True)
         content = args.get("content", "")
         if await ctx.sandbox.file_exists(path):
             return ToolResult(error=f"{path} already exists. Use edit_file to modify it.")

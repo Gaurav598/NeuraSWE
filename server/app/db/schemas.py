@@ -16,12 +16,20 @@ class StepOut(BaseModel):
     id: str
     step_number: int
     agent_name: str | None = None
-    thought: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
     observation: str | None = None
     duration_ms: int | None = None
     token_count: int | None = None
+    created_at: datetime
+
+
+class RunEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    sequence: int
+    event_type: str
+    payload: dict[str, Any]
     created_at: datetime
 
 
@@ -38,11 +46,23 @@ class RunSummary(BaseModel):
     status: RunStatus
     model: str
     total_steps: int
+    model_requests: int = 0
+    total_tokens: int = 0
+    estimated_cost: float | None = None
+    tool_counts: dict[str, int] = Field(default_factory=dict)
     duration_ms: int | None = None
     pr_number: int | None = None
     pr_url: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
+    state_version: int = 0
+    event_sequence: int = 0
+    approval_status: str = "NOT_REQUESTED"
+    pr_status: str = "NOT_REQUESTED"
+    cancellation_requested_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    phase_started_at: datetime | None = None
+    phase_timestamps: dict[str, str] = Field(default_factory=dict)
 
 
 class RunDetail(RunSummary):
@@ -50,6 +70,11 @@ class RunDetail(RunSummary):
     baseline_tests: dict[str, Any] | None = None
     final_tests: dict[str, Any] | None = None
     error_message: str | None = None
+    patch_diff: str | None = None
+    review_summary: dict[str, Any] | None = None
+    approval_comment: str | None = None
+    remote_branch: str | None = None
+    commit_sha: str | None = None
     steps: list[StepOut] = Field(default_factory=list)
 
 
@@ -63,6 +88,8 @@ class RepositoryOut(BaseModel):
     index_status: IndexStatus
     last_indexed_sha: str | None = None
     files_indexed: int
+    indexing_progress: int = 0
+    index_error: str | None = None
     config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -101,6 +128,12 @@ class PaginatedGitHubIssues(BaseModel):
 class ManualRunRequest(BaseModel):
     repo_id: str
     issue_number: int
+    idempotency_key: str | None = None
+
+
+class ReviewDecisionRequest(BaseModel):
+    decision: str
+    comment: str | None = Field(default=None, max_length=4000)
 
 
 class StatsOut(BaseModel):

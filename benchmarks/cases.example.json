@@ -1,0 +1,11 @@
+[
+  {
+    "id": "python-off-by-one",
+    "repository": "benchmarks/fixtures/python_off_by_one",
+    "setup": "python -m pytest -q",
+    "validate": "python -m pytest -q",
+    "expected_paths": ["calculator.py"],
+    "allowed_paths": ["calculator.py"],
+    "timeout_seconds": 60
+  }
+]

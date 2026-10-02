@@ -21,7 +21,7 @@ class Trajectory:
 
     @staticmethod
     def render_step(step: TrajectoryStep) -> str:
-        parts = [f"--- Step {step.step_number} ---", f"THOUGHT: {step.thought}"]
+        parts = [f"--- Step {step.step_number} ---", f"OPERATIONAL SUMMARY: {step.thought}"]
         if step.action is not None:
             action_json = json.dumps({"tool": step.action.tool, "args": step.action.args})
             parts.append(f"ACTION: {action_json}")

@@ -16,6 +16,9 @@ class FakeSandbox:
         self.commands.append(command)
         return self.result
 
+    def validate_path(self, path: str, *, for_write: bool = False) -> str:
+        return path
+
     async def read_file(self, path: str) -> str:
         raise NotImplementedError
 

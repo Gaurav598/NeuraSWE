@@ -6,18 +6,23 @@ automation status (default: NeuraSWE).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import crud
 from app.db.base import get_session
-from app.db.models import Run, RunStatus
+from app.db.models import Run, RunStatus, WebhookDelivery
+from app.metrics import increment
 from app.queue.config import enqueue_run
 from app.realtime.emitter import emit_run_event
 from app.utils.logger import get_logger
@@ -32,8 +37,19 @@ async def jira_webhook(
     session: AsyncSession = Depends(get_session),
     secret: str | None = Query(default=None),
     x_neuraswe_secret: str | None = Header(default=None),
+    x_atlassian_webhook_identifier: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _verify_secret(secret or x_neuraswe_secret)
+    if not x_atlassian_webhook_identifier:
+        if settings.is_production:
+            raise HTTPException(status_code=400, detail="Missing Jira webhook delivery identifier")
+        x_atlassian_webhook_identifier = "dev:" + hashlib.sha256(await request.body()).hexdigest()
+    session.add(WebhookDelivery(provider="jira", delivery_id=x_atlassian_webhook_identifier))
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        return {"status": "duplicate"}
     payload = await _read_payload(request)
 
     if not _changed_to_auto_status(payload):
@@ -81,13 +97,23 @@ async def jira_webhook(
         external_issue_url=issue_url,
     )
     await session.commit()
+    delivery = (
+        await session.execute(select(WebhookDelivery).where(
+            WebhookDelivery.provider == "jira",
+            WebhookDelivery.delivery_id == x_atlassian_webhook_identifier,
+        ))
+    ).scalar_one()
+    delivery.run_id = run.id
+    await session.commit()
     if replaced_run_id is not None:
+        await increment("runs_cancelled_total")
         await emit_run_event(
             replaced_run_id,
             "run:complete",
-            {"status": RunStatus.FAILED.value, "pr_url": None},
+            {"status": RunStatus.CANCELLED.value, "pr_url": None},
         )
     await enqueue_run(run.id)
+    await increment("runs_created_total")
     log.info(
         "jira_run_queued",
         run_id=run.id,
@@ -104,7 +130,9 @@ async def jira_webhook(
 
 
 def _verify_secret(provided: str | None) -> None:
-    if settings.jira_webhook_secret and provided != settings.jira_webhook_secret:
+    if settings.is_production and not settings.jira_webhook_secret:
+        raise HTTPException(status_code=503, detail="Jira webhook secret is not configured")
+    if settings.jira_webhook_secret and not hmac.compare_digest(provided or "", settings.jira_webhook_secret):
         raise HTTPException(status_code=401, detail="Invalid Jira webhook secret")
 
 
@@ -205,7 +233,8 @@ async def _stop_existing_run(session: AsyncSession, run: Run) -> None:
     await crud.update_run(
         session,
         run,
-        status=RunStatus.FAILED,
+        status=RunStatus.CANCELLED,
+        cancellation_requested_at=datetime.now(timezone.utc),
         duration_ms=duration_ms,
         error_message="Restarted by Jira NeuraSWE transition.",
     )

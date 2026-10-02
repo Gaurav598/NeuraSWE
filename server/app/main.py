@@ -19,7 +19,10 @@ log = get_logger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
-    log.info("neuraswe_starting", env=settings.node_env, sandbox_mode="docker/local")
+    log.info(
+        "neuraswe_starting", env=settings.node_env,
+        sandbox_mode="unsafe-local" if settings.sandbox_use_local else "isolated-docker",
+    )
     # In dev without Alembic, create tables on the fly.
     if not settings.is_production:
         try:

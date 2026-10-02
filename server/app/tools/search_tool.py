@@ -15,6 +15,8 @@ class SearchCodeTool(Tool):
         "Semantic search over the codebase using natural language. Returns the "
         "most relevant code chunks with file paths and line numbers."
     )
+    argument_types = {"query": str, "n_results": int}
+    required_arguments = {"query"}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         query = self._require(args, "query")

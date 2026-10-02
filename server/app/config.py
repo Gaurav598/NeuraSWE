@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     node_env: str = Field(default="development", alias="NODE_ENV")
     log_level: str = Field(default="info", alias="LOG_LEVEL")
     cors_origins: str = Field(default="http://localhost:5173", alias="CORS_ORIGINS")
+    auth_required: bool = Field(default=False, alias="AUTH_REQUIRED")
+    auth_tokens: str = Field(default="", alias="AUTH_TOKENS")
 
     # --- Database ---
     database_url: str = Field(
@@ -49,13 +51,13 @@ class Settings(BaseSettings):
     ollama_timeout_s: int = Field(default=180, alias="OLLAMA_TIMEOUT_S")
 
     # --- Hosted LLM provider (primary) ---
-    # LLM_API_KEY may contain several comma-separated keys; the client rotates
-    # across them when one is rate-limited.
+    # A single provider credential. Comma-separated extras are ignored so the
+    # system never cycles credentials to evade provider quota enforcement.
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_base_url: str = Field(default="", alias="LLM_BASE_URL")
     llm_model: str = Field(default="", alias="LLM_MODEL")
     llm_timeout_s: int = Field(default=0, alias="LLM_TIMEOUT_S")
-    # Per-key transient-error retries (network/5xx). 429s rotate immediately.
+    # Bounded transient-error retries (network/5xx). 429/auth failures do not retry.
     llm_max_retries: int = Field(default=2, alias="LLM_MAX_RETRIES")
     # When true, build a fallback chain (primary -> other configured providers).
     llm_fallback_enabled: bool = Field(default=True, alias="LLM_FALLBACK_ENABLED")
@@ -124,6 +126,7 @@ class Settings(BaseSettings):
     # Optional simpler auth for local testing without a full GitHub App.
     github_pat: str = Field(default="", alias="GITHUB_PAT")
     github_default_base_branch: str = Field(default="main", alias="GITHUB_DEFAULT_BASE_BRANCH")
+    github_archive_max_bytes: int = Field(default=100_000_000, alias="GITHUB_ARCHIVE_MAX_BYTES")
 
     # --- Jira integration ---
     jira_base_url: str = Field(default="", alias="JIRA_BASE_URL")
@@ -144,10 +147,17 @@ class Settings(BaseSettings):
     sandbox_image: str = Field(default="neuraswe-sandbox:latest", alias="SANDBOX_IMAGE")
     sandbox_memory_mb: int = Field(default=2048, alias="SANDBOX_MEMORY_MB")
     sandbox_cpu_cores: float = Field(default=1.0, alias="SANDBOX_CPU_CORES")
+    sandbox_pids_limit: int = Field(default=256, alias="SANDBOX_PIDS_LIMIT")
+    sandbox_disk_mb: int = Field(default=2048, alias="SANDBOX_DISK_MB")
+    sandbox_output_limit_bytes: int = Field(default=1_000_000, alias="SANDBOX_OUTPUT_LIMIT_BYTES")
+    sandbox_network_mode: str = Field(default="none", alias="SANDBOX_NETWORK_MODE")
     sandbox_workdir: str = Field(default="/workspace", alias="SANDBOX_WORKDIR")
     # When true, the agent runs commands on the host in a temp dir instead of
     # Docker. Useful for environments without a Docker daemon (CI, dev).
     sandbox_use_local: bool = Field(default=False, alias="SANDBOX_USE_LOCAL")
+    sandbox_allow_unsafe_local: bool = Field(default=False, alias="SANDBOX_ALLOW_UNSAFE_LOCAL")
+    unattended_pr_publication: bool = Field(default=False, alias="UNATTENDED_PR_PUBLICATION")
+    worker_lease_seconds: int = Field(default=90, alias="WORKER_LEASE_SECONDS")
 
     @model_validator(mode="after")
     def normalize_llm_aliases(self) -> Settings:
@@ -164,6 +174,14 @@ class Settings(BaseSettings):
         self.llm_base_url = self.openai_base_url
         self.llm_model = self.openai_model
         self.llm_timeout_s = self.openai_timeout_s
+        return self
+
+    @model_validator(mode="after")
+    def enforce_production_security(self) -> Settings:
+        if self.is_production and (not self.auth_required or not self.auth_token_map):
+            raise ValueError("Production requires AUTH_REQUIRED=true and at least one AUTH_TOKENS entry")
+        if self.is_production and self.sandbox_use_local:
+            raise ValueError("Production forbids SANDBOX_USE_LOCAL")
         return self
 
     @property
@@ -201,6 +219,17 @@ class Settings(BaseSettings):
             for status in self.jira_auto_status.split(",")
             if status.strip()
         }
+
+    @property
+    def auth_token_map(self) -> dict[str, str]:
+        """Map bearer tokens to stable user ids (``token=user`` entries)."""
+        result: dict[str, str] = {}
+        for item in self.auth_tokens.split(","):
+            if "=" in item:
+                token, user_id = item.split("=", 1)
+                if token.strip() and user_id.strip():
+                    result[token.strip()] = user_id.strip()
+        return result
 
 
 @lru_cache

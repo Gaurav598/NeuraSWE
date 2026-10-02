@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import tempfile
 
 from app.utils.logger import get_logger
@@ -18,8 +19,14 @@ async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 300) -> tu
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        start_new_session=True,
     )
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        os.killpg(proc.pid, signal.SIGKILL)
+        await proc.wait()
+        raise
     return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
@@ -28,7 +35,8 @@ async def clone_repo(clone_url: str, dest: str | None = None) -> str:
     dest = dest or tempfile.mkdtemp(prefix="neuraswe-index-")
     code, _, err = await _run(["git", "clone", "--depth", "1", clone_url, dest])
     if code != 0:
-        raise RuntimeError(f"git clone failed: {err}")
+        # Git may echo an authenticated URL; never propagate it into logs/errors.
+        raise RuntimeError(f"git clone failed (exit {code}; {len(err)} bytes of stderr redacted)")
     log.info("repo_cloned", dest=dest)
     return dest
 

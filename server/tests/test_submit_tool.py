@@ -33,18 +33,17 @@ class FakeSandbox:
 
 
 @pytest.mark.asyncio
-async def test_submit_allows_pr_when_baseline_tests_already_failed():
+async def test_submit_blocks_unidentified_failure_even_when_baseline_failed():
     sandbox = FakeSandbox(
         ExecResult(stdout="FirebaseError: missing apiKey", stderr="", exit_code=1),
         diff="diff --git a/client/src/Socket.js b/client/src/Socket.js\n+const backendUrl = 'x';",
     )
     ctx = ToolContext(sandbox=sandbox, baseline_tests={"success": False, "exit_code": 1})
 
-    result = await SubmitSolutionTool().run(ctx, {})
+    result = await SubmitSolutionTool().run(ctx, {"root_cause": "cause", "solution": "fix"})
 
-    assert result.submit is True
-    assert result.metadata["summary"]["success"] is False
-    assert "baseline tests were already failing" in result.output
+    assert result.submit is False
+    assert "Tests are failing" in result.error
 
 
 @pytest.mark.asyncio
@@ -55,7 +54,7 @@ async def test_submit_blocks_new_test_failures_when_baseline_was_green():
     )
     ctx = ToolContext(sandbox=sandbox, baseline_tests={"success": True, "exit_code": 0})
 
-    result = await SubmitSolutionTool().run(ctx, {})
+    result = await SubmitSolutionTool().run(ctx, {"root_cause": "cause", "solution": "fix"})
 
     assert result.submit is False
     assert result.is_error

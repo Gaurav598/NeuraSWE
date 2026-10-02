@@ -46,9 +46,9 @@ server and worker environments.
 - NumPy is pinned below 2 for Chroma compatibility.
 - Embedding concurrency is configurable and defaults to `1`.
 - Large code chunks are split before embedding to avoid Ollama 500s.
-- PR creation fails fast if the patch cannot apply.
-- PR creation fails fast if no commit is created.
-- Run status becomes `FAILED` if the agent solved but PR creation failed.
+- PR creation is disabled until the owner explicitly approves the reviewed patch.
+- Publication rejects unsafe/non-applicable patches and reconciles its deterministic branch before retrying.
+- Publication failure returns the run to review with `pr_status=FAILED`; it does not duplicate PRs.
 - PR branches include a run suffix to avoid branch collisions.
 - The agent supports `LLM_PROVIDER=openai-compatible` for JSON-mode action output.
 - The parser accepts both legacy `THOUGHT/ACTION` text and JSON-mode action objects.

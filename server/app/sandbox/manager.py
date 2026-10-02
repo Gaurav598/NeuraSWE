@@ -1,13 +1,13 @@
 """Sandbox lifecycle management.
 
-Creates a sandbox per issue, clones the repo into it, installs dependencies, and
-returns a ready-to-use :class:`Sandbox`. Chooses Docker by default and falls
-back to a local sandbox when ``SANDBOX_USE_LOCAL`` is set or Docker is absent.
+Creates a sandbox per issue and fails closed when isolation is unavailable.
+Host execution is an explicit, development-only unsafe mode.
 """
 
 from __future__ import annotations
 
 import asyncio
+import shlex
 
 from app.config import settings
 from app.sandbox.local import LocalSandbox
@@ -26,31 +26,54 @@ except Exception:  # pragma: no cover
 
 class SandboxManager:
     def __init__(self) -> None:
-        self._use_local = settings.sandbox_use_local or not _HAS_DOCKER
+        self._use_local = settings.sandbox_use_local
+        if self._use_local and (settings.is_production or not settings.sandbox_allow_unsafe_local):
+            raise RuntimeError(
+                "Unsafe local sandbox requires SANDBOX_ALLOW_UNSAFE_LOCAL=true and is forbidden in production"
+            )
         self._client = None
+        if not self._use_local and not _HAS_DOCKER:
+            raise RuntimeError("Docker sandbox support is unavailable; refusing host execution")
         if not self._use_local:
             try:
                 self._client = docker.from_env()
                 self._client.ping()
-            except Exception as exc:  # daemon not reachable -> fall back
-                log.warning("docker_unavailable_falling_back_to_local", error=str(exc))
-                self._use_local = True
+            except Exception as exc:
+                raise RuntimeError("Docker sandbox unavailable; refusing host execution") from exc
 
     @property
     def mode(self) -> str:
         return "local" if self._use_local else "docker"
 
-    async def create(self, *, clone_url: str | None, branch: str | None = None) -> Sandbox:
+    async def create(
+        self, *, clone_url: str | None, branch: str | None = None,
+        repository_archive: bytes | None = None,
+    ) -> Sandbox:
         """Create a sandbox and clone *clone_url* into it (if provided)."""
         if self._use_local:
             sandbox: Sandbox = await LocalSandbox.create()
         else:
             sandbox = await self._create_docker()
-
-        if clone_url:
-            await self._clone(sandbox, clone_url, branch)
-            await self._install_deps(sandbox)
-        return sandbox
+        try:
+            if repository_archive is not None:
+                await sandbox.seed_archive(repository_archive)
+                await sandbox.exec(
+                    "git init && git config user.email neuraswe@bot && git config user.name NeuraSWE "
+                    "&& git add -A && git commit -m 'NeuraSWE trusted baseline'",
+                    timeout=120,
+                )
+                if settings.sandbox_network_mode == "none" and hasattr(sandbox, "disable_network"):
+                    await sandbox.disable_network()  # type: ignore[attr-defined]
+                await self._install_deps(sandbox)
+            elif clone_url:
+                await self._clone(sandbox, clone_url, branch)
+                if settings.sandbox_network_mode == "none" and hasattr(sandbox, "disable_network"):
+                    await sandbox.disable_network()  # type: ignore[attr-defined]
+                await self._install_deps(sandbox)
+            return sandbox
+        except BaseException:
+            await self.destroy(sandbox)
+            raise
 
     async def _create_docker(self) -> Sandbox:
         from app.sandbox.docker_sandbox import DockerSandbox
@@ -65,7 +88,17 @@ class SandboxManager:
                 auto_remove=True,
                 mem_limit=mem_bytes,
                 nano_cpus=int(settings.sandbox_cpu_cores * 1_000_000_000),
-                network_mode="bridge",
+                # Bootstrap clone access is removed before repository code is run.
+                network_mode="bridge" if settings.sandbox_network_mode == "none" else settings.sandbox_network_mode,
+                pids_limit=settings.sandbox_pids_limit,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                read_only=True,
+                tmpfs={
+                    "/tmp": "rw,noexec,nosuid,size=128m",
+                    settings.sandbox_workdir: f"rw,nosuid,size={settings.sandbox_disk_mb}m",
+                },
+                user="1000:1000",
                 tty=False,
             )
             return container
@@ -78,15 +111,15 @@ class SandboxManager:
         wd = sandbox.workdir
         # Clone into a temp dir then move contents so workdir is the repo root.
         cmd = (
-            f"rm -rf {wd}/.repo && git clone --depth 50 {clone_url} {wd}/.repo && "
-            f"shopt -s dotglob && mv {wd}/.repo/* {wd}/ 2>/dev/null; "
-            f"mv {wd}/.repo/.* {wd}/ 2>/dev/null; rm -rf {wd}/.repo; true"
+            f"rm -rf {shlex.quote(wd)}/.repo && git clone --depth 50 {shlex.quote(clone_url)} {shlex.quote(wd)}/.repo && "
+            f"shopt -s dotglob && mv {shlex.quote(wd)}/.repo/* {shlex.quote(wd)}/ 2>/dev/null; "
+            f"mv {shlex.quote(wd)}/.repo/.* {shlex.quote(wd)}/ 2>/dev/null; rm -rf {shlex.quote(wd)}/.repo; true"
         )
         res = await sandbox.exec(cmd, timeout=300)
         if not res.ok and "already exists" not in res.stderr:
             log.warning("clone_warning", stderr=res.stderr[:500])
         if branch:
-            await sandbox.exec(f"git checkout {branch}", timeout=60)
+            await sandbox.exec(f"git checkout {shlex.quote(branch)}", timeout=60)
 
     async def _install_deps(self, sandbox: Sandbox) -> None:
         """Best-effort dependency install based on detected manifest."""

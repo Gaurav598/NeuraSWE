@@ -15,7 +15,7 @@ export function AgentActivity({ steps, live }: { steps: Step[]; live: LiveStep[]
     <div className="rounded-xl border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-2">
         <Bot className="h-4 w-4 text-blue-300" />
-        <h3 className="text-sm font-medium text-slate-300">Multi-agent activity</h3>
+        <h3 className="text-sm font-medium text-slate-300">Operational activity</h3>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {states.map((agent) => (
@@ -71,11 +71,11 @@ function StatusIcon({ status }: { status: AgentState["status"] }) {
 
 function detailForStep(step: Step): string {
   if (step.tool_name) return `${labelForTool(step.tool_name)} completed.`;
-  return step.thought || "Step completed.";
+  return "Step completed.";
 }
 
 function detailForEvent(event: LiveStep): string {
-  if (event.type === "think") return event.thought || "Thinking through the next action.";
+  if (event.type === "think") return "Selecting the next permitted operation.";
   if (event.type === "act" && event.tool) return `${labelForTool(event.tool)} in progress.`;
   if (event.type === "creating_pr") return "Creating pull request.";
   if (event.type === "done") return event.observation || "Done.";

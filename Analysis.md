@@ -1,5 +1,11 @@
 # Architecture Audit Report: NeuraSWE
 
+> Historical note: this assessment describes the original prototype. The
+> production-reliability upgrade documented in `ARCHITECTURE.md`,
+> `SANDBOX_SECURITY.md`, and `RUN_LIFECYCLE.md` supersedes its lifecycle and
+> security findings, including the host Docker-socket, unauthenticated API,
+> unrestricted sandbox-network, and automatic PR-publication findings below.
+
 ---
 
 # 1. Executive Summary

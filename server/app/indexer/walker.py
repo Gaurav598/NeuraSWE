@@ -13,6 +13,7 @@ SKIP_DIRS = {
 SKIP_FILES = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
     "Cargo.lock", "go.sum", "composer.lock", "Gemfile.lock",
+    ".env", ".npmrc", ".pypirc", "credentials.json", "secrets.json",
 }
 
 LANGUAGE_BY_EXT = {
@@ -37,7 +38,8 @@ def walk_source_files(root: str) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
-            if name in SKIP_FILES:
+            lowered = name.lower()
+            if name in SKIP_FILES or lowered.startswith(".env.") or lowered.endswith((".pem", ".key", ".p12")):
                 continue
             if detect_language(name) is None:
                 continue

@@ -91,7 +91,7 @@ class VectorStore:
             metas = (res.get("metadatas") or [[]])[0]
             dists = (res.get("distances") or [[]])[0]
             out: list[dict[str, Any]] = []
-            for doc, meta, dist in zip(docs, metas, dists):
+            for doc, meta, dist in zip(docs, metas, dists, strict=False):
                 out.append(
                     {
                         "content": doc,

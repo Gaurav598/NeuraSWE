@@ -71,6 +71,18 @@ class GitHubClient:
         tok = await self.token()
         return f"https://x-access-token:{tok}@github.com/{owner}/{repo}.git"
 
+    async def download_archive(self, owner: str, repo: str, ref: str) -> bytes:
+        """Download source through the trusted control plane; tokens never enter a sandbox."""
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            resp = await client.get(
+                f"{API}/repos/{owner}/{repo}/tarball/{ref}", headers=await self._headers()
+            )
+            resp.raise_for_status()
+            content = resp.content
+        if len(content) > settings.github_archive_max_bytes:
+            raise RuntimeError("Repository archive exceeds configured size limit")
+        return content
+
     # ----------------------------- api ------------------------------ #
     async def get_issue(self, owner: str, repo: str, number: int) -> dict:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -79,6 +91,19 @@ class GitHubClient:
             )
             resp.raise_for_status()
             return resp.json()
+
+    async def get_repository(self, owner: str, repo: str) -> dict:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{API}/repos/{owner}/{repo}", headers=await self._headers()
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def can_push(self, owner: str, repo: str) -> bool:
+        data = await self.get_repository(owner, repo)
+        permissions = data.get("permissions") or {}
+        return bool(permissions.get("push") or permissions.get("admin") or permissions.get("maintain"))
 
     async def list_issues(
         self,
@@ -113,6 +138,30 @@ class GitHubClient:
                 headers=await self._headers(),
                 json={"title": title, "head": head, "base": base, "body": body},
             )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def find_pull_request(self, owner: str, repo: str, *, head: str) -> dict | None:
+        """Find a prior PR for the deterministic run branch after ambiguous failures."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{API}/repos/{owner}/{repo}/pulls",
+                headers=await self._headers(),
+                params={"state": "all", "head": f"{owner}:{head}", "per_page": 10},
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return rows[0] if rows else None
+
+    async def get_branch(self, owner: str, repo: str, branch: str) -> dict | None:
+        """Return a remote branch, allowing publication retry after an ambiguous push."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{API}/repos/{owner}/{repo}/branches/{branch}",
+                headers=await self._headers(),
+            )
+            if resp.status_code == 404:
+                return None
             resp.raise_for_status()
             return resp.json()
 

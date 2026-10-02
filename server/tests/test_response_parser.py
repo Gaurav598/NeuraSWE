@@ -3,6 +3,15 @@
 from app.agent.response_parser import parse_response
 
 
+def test_json_summary_protocol_parses_without_private_reasoning_field():
+    parsed = parse_response(
+        '{"summary":"Inspect the failing path.","action":{"tool":"git_diff","args":{}}}'
+    )
+    assert parsed.thought == "Inspect the failing path."
+    assert parsed.action is not None
+    assert parsed.action.tool == "git_diff"
+
+
 def test_clean_thought_and_action():
     text = (
         'THOUGHT: I should search for the login handler.\n'

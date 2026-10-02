@@ -13,7 +13,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import IndexStatus, Repository, Run, RunStatus, Step
+from app.db.models import IndexStatus, Repository, Run, RunEvent, RunStatus, Step
+from app.run_state import TERMINAL, assert_transition
 
 
 # --------------------------------------------------------------------------- #
@@ -24,14 +25,26 @@ async def get_repository(session: AsyncSession, repo_id: str) -> Repository | No
 
 
 async def get_repository_by_full_name(
-    session: AsyncSession, owner: str, name: str
+    session: AsyncSession, owner: str, name: str, *, owner_id: str = "local"
 ) -> Repository | None:
-    stmt = select(Repository).where(Repository.owner == owner, Repository.name == name)
+    stmt = select(Repository).where(
+        Repository.owner_id == owner_id, Repository.owner == owner, Repository.name == name
+    )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def list_repositories(session: AsyncSession) -> list[Repository]:
-    stmt = select(Repository).order_by(Repository.created_at.desc())
+async def list_repositories_by_full_name(
+    session: AsyncSession, owner: str, name: str
+) -> list[Repository]:
+    """Return ownership records for webhook-to-principal resolution."""
+    stmt = select(Repository).where(
+        Repository.owner == owner, Repository.name == name
+    ).order_by(Repository.created_at)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def list_repositories(session: AsyncSession, *, owner_id: str = "local") -> list[Repository]:
+    stmt = select(Repository).where(Repository.owner_id == owner_id).order_by(Repository.created_at.desc())
     return list((await session.execute(stmt)).scalars().all())
 
 
@@ -40,10 +53,11 @@ async def upsert_repository(
     owner: str,
     name: str,
     installation_id: int | None = None,
+    owner_id: str = "local",
 ) -> Repository:
-    repo = await get_repository_by_full_name(session, owner, name)
+    repo = await get_repository_by_full_name(session, owner, name, owner_id=owner_id)
     if repo is None:
-        repo = Repository(owner=owner, name=name, installation_id=installation_id)
+        repo = Repository(owner=owner, name=name, installation_id=installation_id, owner_id=owner_id)
         session.add(repo)
         await session.flush()
     elif installation_id is not None:
@@ -58,12 +72,17 @@ async def set_index_status(
     *,
     files_indexed: int | None = None,
     last_indexed_sha: str | None = None,
+    index_error: str | None = None,
+    indexing_progress: int | None = None,
 ) -> None:
     repo.index_status = status
     if files_indexed is not None:
         repo.files_indexed = files_indexed
     if last_indexed_sha is not None:
         repo.last_indexed_sha = last_indexed_sha
+    repo.index_error = index_error
+    if indexing_progress is not None:
+        repo.indexing_progress = max(0, min(100, indexing_progress))
     await session.flush()
 
 
@@ -81,7 +100,17 @@ async def create_run(
     source: str = "github",
     external_issue_key: str | None = None,
     external_issue_url: str | None = None,
+    owner_id: str = "local",
+    idempotency_key: str | None = None,
 ) -> Run:
+    if idempotency_key:
+        existing = (
+            await session.execute(select(Run).where(
+                Run.owner_id == owner_id, Run.idempotency_key == idempotency_key
+            ))
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
     run = Run(
         repository_id=repository_id,
         issue_number=issue_number,
@@ -92,10 +121,21 @@ async def create_run(
         external_issue_url=external_issue_url,
         model=model,
         status=RunStatus.QUEUED,
+        owner_id=owner_id,
+        idempotency_key=idempotency_key,
     )
     session.add(run)
     await session.flush()
     return run
+
+
+async def get_run_by_idempotency(
+    session: AsyncSession, *, owner_id: str, idempotency_key: str
+) -> Run | None:
+    stmt = select(Run).where(
+        Run.owner_id == owner_id, Run.idempotency_key == idempotency_key
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_run(session: AsyncSession, run_id: str, *, with_steps: bool = False) -> Run | None:
@@ -110,11 +150,12 @@ async def list_runs(
     *,
     repository_id: str | None = None,
     status: RunStatus | None = None,
+    owner_id: str = "local",
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[Run], int]:
-    stmt = select(Run)
-    count_stmt = select(func.count()).select_from(Run)
+    stmt = select(Run).where(Run.owner_id == owner_id)
+    count_stmt = select(func.count()).select_from(Run).where(Run.owner_id == owner_id)
     if repository_id:
         stmt = stmt.where(Run.repository_id == repository_id)
         count_stmt = count_stmt.where(Run.repository_id == repository_id)
@@ -143,7 +184,7 @@ async def get_active_run_by_external_issue(
         .where(
             Run.source == source,
             Run.external_issue_key == external_issue_key,
-            Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]),
+            Run.status.not_in(list(TERMINAL)),
         )
         .order_by(Run.created_at.desc())
         .limit(1)
@@ -152,13 +193,34 @@ async def get_active_run_by_external_issue(
 
 
 async def update_run(session: AsyncSession, run: Run, **fields: Any) -> Run:
+    target = fields.get("status")
+    if target is not None and target != run.status:
+        assert_transition(run.status, target)
+        run.state_version += 1
+        now = datetime.now(timezone.utc)
+        run.phase_started_at = now
+        timestamps = dict(run.phase_timestamps or {})
+        timestamps[target.value] = now.isoformat()
+        run.phase_timestamps = timestamps
     for key, value in fields.items():
         setattr(run, key, value)
-    if fields.get("status") in (RunStatus.SOLVED, RunStatus.FAILED, RunStatus.TIMEOUT):
+    if fields.get("status") in TERMINAL:
         if run.completed_at is None:
             run.completed_at = datetime.now(timezone.utc)
     await session.flush()
     return run
+
+
+async def add_run_event(
+    session: AsyncSession, run: Run, event_type: str, payload: dict[str, Any]
+) -> RunEvent:
+    run.event_sequence += 1
+    event = RunEvent(
+        run_id=run.id, sequence=run.event_sequence, event_type=event_type, payload=payload
+    )
+    session.add(event)
+    await session.flush()
+    return event
 
 
 # --------------------------------------------------------------------------- #
@@ -196,39 +258,40 @@ async def add_step(
 # --------------------------------------------------------------------------- #
 # Stats
 # --------------------------------------------------------------------------- #
-async def compute_stats(session: AsyncSession) -> dict[str, Any]:
-    total = (await session.execute(select(func.count()).select_from(Run))).scalar_one()
+async def compute_stats(session: AsyncSession, *, owner_id: str = "local") -> dict[str, Any]:
+    owned = Run.owner_id == owner_id
+    total = (await session.execute(select(func.count()).select_from(Run).where(owned))).scalar_one()
     solved = (
         await session.execute(
-            select(func.count()).select_from(Run).where(Run.status == RunStatus.SOLVED)
+            select(func.count()).select_from(Run).where(owned, Run.status.in_([RunStatus.SOLVED, RunStatus.COMPLETED]))
         )
     ).scalar_one()
     failed = (
         await session.execute(
             select(func.count())
             .select_from(Run)
-            .where(Run.status.in_([RunStatus.FAILED, RunStatus.TIMEOUT]))
+            .where(owned, Run.status.in_([RunStatus.FAILED, RunStatus.TIMEOUT, RunStatus.TIMED_OUT]))
         )
     ).scalar_one()
     in_progress = (
         await session.execute(
             select(func.count())
             .select_from(Run)
-            .where(Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
+            .where(owned, Run.status.not_in(list(TERMINAL)))
         )
     ).scalar_one()
 
     avg_steps = (
         await session.execute(
             select(func.coalesce(func.avg(Run.total_steps), 0.0)).where(
-                Run.status == RunStatus.SOLVED
+                owned, Run.status.in_([RunStatus.SOLVED, RunStatus.COMPLETED])
             )
         )
     ).scalar_one()
     avg_duration = (
         await session.execute(
             select(func.coalesce(func.avg(Run.duration_ms), 0.0)).where(
-                Run.duration_ms.is_not(None)
+                owned, Run.duration_ms.is_not(None)
             )
         )
     ).scalar_one()
@@ -238,7 +301,7 @@ async def compute_stats(session: AsyncSession) -> dict[str, Any]:
 
     recent_rows = list(
         (
-            await session.execute(select(Run).order_by(Run.created_at.desc()).limit(10))
+            await session.execute(select(Run).where(owned).order_by(Run.created_at.desc()).limit(10))
         ).scalars().all()
     )
 

@@ -24,6 +24,17 @@ async def enqueue_run(run_id: str) -> None:
     """Enqueue an agent run by its DB id."""
     pool = await create_pool(redis_settings())
     try:
+        # Duplicate deliveries are harmless: the database claim is atomic and only
+        # one worker can move QUEUED -> PREPARING.
         await pool.enqueue_job("process_run", run_id)
+    finally:
+        await pool.close()
+
+
+async def enqueue_publish(run_id: str) -> None:
+    """Enqueue idempotent publication after an explicit approval."""
+    pool = await create_pool(redis_settings())
+    try:
+        await pool.enqueue_job("publish_run", run_id)
     finally:
         await pool.close()
