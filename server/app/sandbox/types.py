@@ -11,6 +11,8 @@ class ExecResult:
     stdout: str
     stderr: str
     exit_code: int
+    timed_out: bool = False
+    truncated: bool = False
 
     @property
     def ok(self) -> bool:
@@ -43,5 +45,13 @@ class Sandbox(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def seed_archive(self, archive: bytes) -> None:
+        """Populate the workspace from a trusted source archive."""
+
+    @abc.abstractmethod
     async def destroy(self) -> None:
         ...
+
+    @abc.abstractmethod
+    def validate_path(self, path: str, *, for_write: bool = False) -> str:
+        """Validate and normalize a repository-relative path."""

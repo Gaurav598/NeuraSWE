@@ -1,6 +1,6 @@
 # NeuraSWE — Autonomous AI Software Engineering Agent
 
-> NeuraSWE turns GitHub issues and Jira tickets into autonomous coding runs. It maps an issue to a repository, clones/indexes the codebase, runs a ReAct-style coding agent in a sandbox, streams every reasoning/tool step to a dashboard, verifies changes with tests, and can open a GitHub pull request.
+> NeuraSWE turns GitHub issues and Jira tickets into reviewable coding runs. It maps an issue to an authorized repository, clones/indexes the codebase, runs a tool-using coding agent in an isolated sandbox, streams operational evidence, verifies changes, and opens a pull request only after explicit approval.
 
 This project is a from-scratch agentic software engineering platform built with **FastAPI, React, PostgreSQL, Redis, ChromaDB, Docker, Socket.IO, GitHub API, Jira Automation, and multi-provider LLM fallback**. It does not use LangChain, CrewAI, or another agent framework; the prompt loop, tool registry, trajectory handling, queue processor, and realtime trace system are implemented directly.
 
@@ -32,11 +32,12 @@ Pull request created by NeuraSWE:
 - **GitHub issue execution**: fetches a GitHub issue, builds an internal run, and lets the agent fix the target repo.
 - **Jira-triggered execution**: Jira Automation can call `/api/webhook/jira` when a ticket enters `NeuraSWE`, `In Progress`, or another configured status.
 - **Repository mapping**: Jira project keys map to GitHub repositories, for example `SCRUM=Gaurav598/NeuraSWE`.
-- **Autonomous coding loop**: the agent searches code, reads files, edits files, runs tests, inspects diffs, and submits a solution.
+- **Autonomous coding loop**: the agent searches code, reads files, edits files, runs tests, inspects diffs, and submits a patch for review.
 - **Real-time dashboard**: React UI shows run state, agent activity, tool calls, observations, diffs, touched files, tests, errors, and PR links.
 - **Run controls**: active runs can be stopped; completed/failed runs can be deleted; failed runs can be bulk-cleaned for demos.
 - **Multi-provider resilience**: supports Gemini, Groq, OpenRouter, OpenAI-compatible APIs, and local Ollama fallback.
-- **Sandboxed execution**: tools run inside an isolated Docker sandbox with memory/CPU limits.
+- **Sandboxed execution**: tools fail closed into a dedicated Docker daemon with non-root, capability, filesystem, network and resource controls.
+- **Human review**: approve, reject, or request changes; PR publication is approval-gated and idempotent.
 
 ## What's inside
 
@@ -49,7 +50,7 @@ Pull request created by NeuraSWE:
 | Vector store | ChromaDB |
 | Agent LLM | OpenAI-compatible clients with provider fallback: Gemini, Groq, OpenRouter, Ollama |
 | Embeddings | Ollama `nomic-embed-text` |
-| Sandbox | Docker sandbox manager with local fallback |
+| Sandbox | Dedicated Docker daemon; explicit unsafe development-only local mode |
 | GitHub | PAT or GitHub App support for issue fetch, branch push, PR creation |
 | Jira | Jira Automation webhook receiver with project-to-repo mapping |
 | Dashboard | React 18 + Vite + Tailwind + Recharts + Framer Motion + Socket.IO |
@@ -73,7 +74,7 @@ Repository dashboard ──────┘                                      
                                                               Docker sandbox + test verification
                                                                                     │
                                                                                     ▼
-                                                              GitHub branch/PR + live dashboard
+                                                              Human review → GitHub branch/PR
 ```
 
 The ReAct loop lives in [`server/app/agent/runtime.py`](server/app/agent/runtime.py).
@@ -91,14 +92,16 @@ The ReAct loop lives in [`server/app/agent/runtime.py`](server/app/agent/runtime
 ### Run the full stack
 
 ```bash
-cp .env.example .env          # add GITHUB_PAT and LLM_API_KEY
+cp .env.example .env          # add GitHub/LLM credentials
+# Also set AUTH_TOKENS=<random-token>=local and VITE_API_TOKEN=<random-token>
 docker compose up -d postgres redis chromadb ollama
 
 # Pull models (one-time, several GB)
 bash scripts/setup-ollama.sh
 
 # Build the agent sandbox image
-bash scripts/build-sandbox.sh
+docker compose up -d sandbox-daemon
+docker compose run --rm worker python -m app.sandbox.build_image
 
 # Start backend, worker, and dashboard
 docker compose up -d server worker client
@@ -115,7 +118,7 @@ cd server
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 alembic upgrade head          # or it auto-creates tables in dev
-export SANDBOX_USE_LOCAL=true # run agent commands on host instead of Docker
+export SANDBOX_USE_LOCAL=true SANDBOX_ALLOW_UNSAFE_LOCAL=true # unsafe dev only
 uvicorn app.main:app --port 3001 --reload
 
 # Worker (separate terminal)
@@ -129,7 +132,7 @@ cd client && npm install && npm run dev
 1. Open the dashboard → **Repositories** → connect `owner/repo` so the codebase can be indexed.
 2. Start from GitHub/manual flow: open **Issues**, pick an issue, and trigger a run.
 3. Start from Jira flow: move a configured Jira ticket into the `NeuraSWE` status so Jira Automation calls `/api/webhook/jira`.
-4. Open **Runs** and watch the reasoning trace, agent activity, touched files, tests, diff, errors, and PR status stream in real time.
+4. Open **Runs** and watch operational activity, touched files, tests, diff, errors, approval, and PR status in real time.
 
 Seed a demo run for screenshots:
 ```bash
@@ -268,7 +271,7 @@ The GitHub E2E path is designed to:
 5. Apply the generated diff to a fresh clone.
 6. Create a unique `neuraswe/issue-<n>-<run>` branch.
 7. Open a GitHub PR.
-8. Mark the run failed if PR creation fails.
+8. Hold the patch for human review; create/reconcile a PR only after approval.
 
 Merging is intentionally left to GitHub review/permissions.
 
@@ -286,7 +289,7 @@ implemented yet, but it can use the same internal `Run` creation path.
 On connect, the repo is cloned, walked (skipping `node_modules`, lockfiles, binaries), and chunked **function-level** (Python via `ast`; other languages via declaration heuristics with a 100-line/20-overlap sliding-window fallback). Each chunk is embedded with `nomic-embed-text` and stored in ChromaDB (cosine). The agent's `search_code` tool embeds the query and returns the top-10 nearest chunks. See `server/app/indexer/`.
 
 ### 2. The ReAct loop
-Each turn the LLM is given the system prompt, the issue, and the trajectory so far, and must emit a structured action. In production, OpenAI-compatible JSON mode returns `{"thought": "...", "action": {"tool": "...", "args": {...}}}` so invalid tool output is greatly reduced. The runtime still validates every action, fails fast on repeated protocol failures, and never merges code automatically.
+Each turn the LLM is given the system prompt, the issue, and the trajectory so far, and must emit a structured action. The runtime validates every tool name, argument schema and permission, fails fast on repeated protocol failures, and never exposes private reasoning or merges code automatically.
 
 ### 3. Context management
 First N steps are kept verbatim. When the trajectory exceeds the token budget, the middle steps are summarized by the LLM into one dense paragraph while the first 3 and last 7 steps are preserved (`server/app/agent/context_manager.py`).

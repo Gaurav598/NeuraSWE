@@ -4,8 +4,8 @@ This module provides three things:
 
 * ``OllamaChat`` — local model client (kept for offline / embedding-only setups).
 * ``OpenAICompatibleChat`` — a single OpenAI-compatible provider (Groq, Gemini's
-  OpenAI-compat endpoint, OpenRouter, OpenAI, ...). It rotates across multiple
-  API keys and is *rate-limit aware*: on HTTP 429 it reads ``Retry-After`` and
+  OpenAI-compat endpoint, OpenRouter, OpenAI, ...). It is *rate-limit aware*:
+  on HTTP 429 it reads ``Retry-After`` and
   raises :class:`RateLimited` instead of blindly hammering the endpoint.
 * ``FallbackChatClient`` — chains several providers together. When one provider
   is throttled or failing, it transparently falls through to the next and keeps
@@ -17,6 +17,7 @@ The goal: run reliably on free API tiers by stacking several of them.
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from email.utils import parsedate_to_datetime
 from typing import Protocol
@@ -68,6 +69,30 @@ class ChatClient(Protocol):
         ...
 
 
+class TrackedChatClient:
+    """Expose provider-attempt counts, falling back to logical calls for test clients."""
+
+    def __init__(self, inner: ChatClient) -> None:
+        self.inner = inner
+        self._logical_request_count = 0
+
+    @property
+    def request_count(self) -> int:
+        return int(getattr(self.inner, "request_count", self._logical_request_count))
+
+    @property
+    def token_count(self) -> int:
+        return int(getattr(self.inner, "token_count", 0))
+
+    async def chat(self, *args, **kwargs) -> str:
+        self._logical_request_count += 1
+        return await self.inner.chat(*args, **kwargs)
+
+    async def summarize(self, *args, **kwargs) -> str:
+        self._logical_request_count += 1
+        return await self.inner.summarize(*args, **kwargs)
+
+
 def _parse_retry_after(resp: httpx.Response) -> float | None:
     raw = resp.headers.get("retry-after")
     if not raw:
@@ -89,6 +114,8 @@ class OllamaChat:
     def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
         self.model = model or settings.ollama_chat_model
         self.base_url = (base_url or settings.ollama_url).rstrip("/")
+        self.request_count = 0
+        self.token_count = 0
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
     async def chat(
@@ -99,6 +126,7 @@ class OllamaChat:
         temperature: float = 0.1,
         max_tokens: int = 1024,
     ) -> str:
+        self.request_count += 1
         payload = {
             "model": self.model,
             "stream": False,
@@ -115,6 +143,8 @@ class OllamaChat:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
+        self.token_count += int(data.get("prompt_eval_count") or 0)
+        self.token_count += int(data.get("eval_count") or 0)
         message = data.get("message", {})
         content = message.get("content", "")
         if not content:
@@ -131,12 +161,15 @@ class OllamaChat:
 
 
 # --------------------------------------------------------------------------- #
-# Hosted (OpenAI-compatible) — key rotation + rate-limit aware
+# Hosted (OpenAI-compatible) — single credential + rate-limit aware
 # --------------------------------------------------------------------------- #
 def _split_keys(value: str | None) -> list[str]:
     if not value:
         return []
-    return [k.strip() for k in value.split(",") if k.strip()]
+    keys = [k.strip() for k in value.split(",") if k.strip()]
+    if len(keys) > 1:
+        log.warning("multiple_provider_keys_ignored", reason="credential rotation to bypass quotas is disabled")
+    return keys[:1]
 
 
 class OpenAICompatibleChat:
@@ -154,7 +187,10 @@ class OpenAICompatibleChat:
         requests_per_minute: int | None = None,
     ) -> None:
         if api_keys is not None:
-            keys = [k for k in api_keys if k]
+            supplied = [k for k in api_keys if k]
+            if len(supplied) > 1:
+                log.warning("multiple_provider_keys_ignored", reason="credential rotation to bypass quotas is disabled")
+            keys = supplied[:1]
         elif api_key is not None:
             keys = _split_keys(api_key)
         else:
@@ -169,6 +205,8 @@ class OpenAICompatibleChat:
         self.base_url = (base_url or settings.llm_base_url).rstrip("/")
         self.timeout = timeout or settings.llm_timeout_s
         self.transport = transport
+        self.request_count = 0
+        self.token_count = 0
         self.max_retries = settings.llm_max_retries if max_retries is None else max_retries
         rpm = settings.llm_requests_per_minute if requests_per_minute is None else requests_per_minute
         # Proactive pacing: minimum seconds between requests to stay under RPM.
@@ -198,7 +236,7 @@ class OpenAICompatibleChat:
             system=(
                 system
                 + "\n\nFor this request, return ONLY one valid JSON object in this shape: "
-                '{"thought":"reasoning","action":{"tool":"tool_name","args":{}}}.'
+                '{"summary":"brief operational rationale","action":{"tool":"tool_name","args":{}}}.'
             ),
             user=user,
             temperature=temperature,
@@ -237,13 +275,13 @@ class OpenAICompatibleChat:
             payload["response_format"] = {"type": "json_object"}
 
         last_error: Exception | None = None
-        # Rotate across keys; within a key, retry only transient (5xx/network) errors.
+        # One credential only; retry bounded transient failures, never quota/auth failures.
         for key in self.api_keys:
             for attempt in range(self.max_retries + 1):
                 try:
                     return await self._request(payload, key)
                 except RateLimited as exc:
-                    # Don't burn retries on a throttled key — rotate to the next.
+                    # Quota failures are surfaced immediately; never cycle keys.
                     last_error = exc
                     break
                 except AuthError as exc:
@@ -252,13 +290,14 @@ class OpenAICompatibleChat:
                 except (httpx.TransportError, httpx.TimeoutException, _Transient) as exc:
                     last_error = exc
                     if attempt < self.max_retries:
-                        await asyncio.sleep(min(2 ** attempt, 8))
+                        await asyncio.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.25))
                         continue
                     break
         assert last_error is not None
         raise last_error
 
     async def _request(self, payload: dict, api_key: str) -> str:
+        self.request_count += 1
         await self._throttle()
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
             resp = await client.post(
@@ -275,6 +314,8 @@ class OpenAICompatibleChat:
             raise _Transient(f"{self.name}: provider {resp.status_code}")
         resp.raise_for_status()
         data = resp.json()
+        usage = data.get("usage") or {}
+        self.token_count += int(usage.get("total_tokens") or 0)
 
         choices = data.get("choices") or []
         content = (choices[0].get("message", {}) if choices else {}).get("content", "")
@@ -296,6 +337,14 @@ class FallbackChatClient:
             raise ValueError("FallbackChatClient requires at least one provider")
         self._clients = clients
         self._cooldown: dict[str, float] = {}
+
+    @property
+    def request_count(self) -> int:
+        return sum(int(getattr(client, "request_count", 0)) for _, client in self._clients)
+
+    @property
+    def token_count(self) -> int:
+        return sum(int(getattr(client, "token_count", 0)) for _, client in self._clients)
 
     async def chat(self, *args, **kwargs) -> str:
         return await self._run("chat", *args, **kwargs)
@@ -372,12 +421,20 @@ class HedgedChatClient:
         self._clients = clients
         self._grace_s = max(0.0, grace_s)
 
+    @property
+    def request_count(self) -> int:
+        return sum(int(getattr(client, "request_count", 0)) for _, client in self._clients)
+
+    @property
+    def token_count(self) -> int:
+        return sum(int(getattr(client, "token_count", 0)) for _, client in self._clients)
+
     async def chat(self, *args, **kwargs) -> str:
-        return await self._race(validate=True, *args, **kwargs)
+        return await self._race(*args, validate=True, **kwargs)
 
     async def summarize(self, *args, **kwargs) -> str:
         # Summaries aren't on the critical path and don't need JSON validity.
-        return await self._race(validate=False, method="summarize", *args, **kwargs)
+        return await self._race(*args, validate=False, method="summarize", **kwargs)
 
     async def _race(self, *args, validate: bool, method: str = "chat", **kwargs) -> str:
         tasks: dict[asyncio.Task, str] = {}

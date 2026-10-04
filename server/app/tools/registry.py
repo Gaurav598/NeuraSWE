@@ -34,6 +34,9 @@ class ToolRegistry:
                 error=f"Unknown tool '{name}'. Available tools: {available}"
             )
         try:
+            if tool.permission not in ctx.allowed_permissions:
+                return ToolResult(error=f"Tool '{name}' is not permitted for this run")
+            tool.validate_args(args or {})
             return await tool.run(ctx, args or {})
         except ValueError as exc:
             return ToolResult(error=str(exc))

@@ -24,4 +24,4 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-ignore = ["E501"]
+ignore = ["E501", "B008"]  # FastAPI dependency declarations intentionally call Depends.

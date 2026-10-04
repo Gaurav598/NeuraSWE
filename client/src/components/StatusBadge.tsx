@@ -2,6 +2,18 @@ import type { RunStatus, IndexStatus } from "../types";
 
 const RUN_COLORS: Record<RunStatus, string> = {
   QUEUED: "bg-slate-500/20 text-slate-300 border-slate-500/40",
+  PREPARING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
+  ANALYZING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
+  PLANNING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
+  IMPLEMENTING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
+  VALIDATING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
+  AWAITING_APPROVAL: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+  CHANGES_REQUESTED: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+  PR_CREATING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
+  COMPLETED: "bg-green-500/20 text-green-300 border-green-500/40",
+  CANCELLED: "bg-slate-500/20 text-slate-300 border-slate-500/40",
+  TIMED_OUT: "bg-amber-500/20 text-amber-300 border-amber-500/40",
+  REJECTED: "bg-slate-500/20 text-slate-300 border-slate-500/40",
   RUNNING: "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse",
   SOLVED: "bg-green-500/20 text-green-300 border-green-500/40",
   FAILED: "bg-red-500/20 text-red-300 border-red-500/40",

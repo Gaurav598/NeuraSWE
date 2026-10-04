@@ -1,6 +1,6 @@
 # Solve your first real issue with NeuraSWE (Docker Compose)
 
-Goal: get one GitHub issue auto-fixed end-to-end (issue → branch → PR) without
+Goal: get one GitHub issue fixed through a reviewed flow (issue → patch → approval → PR) without
 dying on Groq's free-tier limit. The trick is two-fold: **shrink token usage per
 run**, and **add Gemini as a free fallback** so a throttled Groq never kills a run.
 
@@ -43,10 +43,10 @@ Then set these values (Groq stays primary for quality; Gemini is the safety net)
 GITHUB_PAT=ghp_your_token_here
 GITHUB_DEFAULT_BASE_BRANCH=main          # change if your repo's default isn't main
 
-# --- Primary model: Groq. You can list MULTIPLE keys, comma-separated, to
-#     multiply your daily budget — the client rotates when one is throttled. ---
+# --- Primary model: Groq. Use one accountable credential; quota/auth failures
+#     are surfaced or handed to a separately configured fallback provider. ---
 LLM_PROVIDER=openai-compatible
-LLM_API_KEY=gsk_key1,gsk_key2            # 1+ Groq keys (free accounts are fine)
+LLM_API_KEY=gsk_your_key_here
 LLM_MODEL=llama-3.3-70b-versatile
 LLM_BASE_URL=https://api.groq.com/openai/v1
 LLM_REQUESTS_PER_MINUTE=15

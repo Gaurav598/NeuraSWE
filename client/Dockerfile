@@ -1,4 +1,6 @@
 FROM node:20-alpine AS build
+ARG VITE_API_TOKEN
+ENV VITE_API_TOKEN=$VITE_API_TOKEN
 WORKDIR /app
 COPY package.json ./
 RUN npm install

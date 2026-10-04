@@ -1,4 +1,4 @@
-"""Tests for rate-limit-aware rotation and the provider fallback chain."""
+"""Tests for rate-limit classification and the provider fallback chain."""
 
 import httpx
 import pytest
@@ -20,7 +20,7 @@ def _ok_response() -> httpx.Response:
 
 
 @pytest.mark.asyncio
-async def test_rotates_keys_on_429():
+async def test_does_not_rotate_credentials_on_429():
     seen_keys: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -38,9 +38,9 @@ async def test_rotates_keys_on_429():
         max_retries=0,
     )
 
-    raw = await chat.chat("system", "user")
-    assert '"tool"' in raw
-    assert seen_keys == ["key-1", "key-2"]  # rotated to the second key
+    with pytest.raises(RateLimited):
+        await chat.chat("system", "user")
+    assert seen_keys == ["key-1"]
 
 
 @pytest.mark.asyncio

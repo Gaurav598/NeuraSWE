@@ -4,6 +4,9 @@ from app.github.pr_creator import PRCreator
 
 
 class FakeGitHubClient:
+    async def get_branch(self, owner: str, repo: str, branch: str) -> dict | None:
+        return None
+
     async def clone_url(self, owner: str, repo: str) -> str:
         return f"https://github.com/{owner}/{repo}.git"
 

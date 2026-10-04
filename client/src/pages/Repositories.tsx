@@ -65,7 +65,13 @@ export function Repositories() {
                 <div className="text-xs text-slate-500">
                   {r.files_indexed} files indexed
                   {r.last_indexed_sha ? ` · ${r.last_indexed_sha.slice(0, 7)}` : ""}
+                  {r.index_status === "INDEXING" ? ` · ${r.indexing_progress}%` : ""}
                 </div>
+                <div className="mt-1 text-xs text-slate-500">
+                  Integration: {String(r.config.integration_state || "not verified")}
+                  {typeof r.config.can_push === "boolean" ? ` · push ${r.config.can_push ? "allowed" : "denied"}` : ""}
+                </div>
+                {r.index_error && <div className="mt-1 max-w-xl truncate text-xs text-red-300">{r.index_error}</div>}
               </div>
             </div>
             <div className="flex items-center gap-3">

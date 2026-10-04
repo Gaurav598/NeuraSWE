@@ -7,13 +7,14 @@ is streamed via an optional async callback (used for Socket.IO + DB persistence)
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.context_manager import ContextManager
-from app.agent.llm import ChatClient, build_chat_client
+from app.agent.llm import ChatClient, TrackedChatClient, build_chat_client
 from app.agent.prompt_builder import PromptBuilder
 from app.agent.response_parser import parse_response
 from app.agent.trajectory import Trajectory
@@ -48,6 +49,9 @@ class AgentResult:
     error_message: str | None = None
     branch: str = ""
     duration_ms: int = 0
+    model_requests: int = 0
+    provider_tokens: int = 0
+    review_summary: dict[str, Any] = field(default_factory=dict)
 
 
 # Callback signature for streaming step lifecycle events.
@@ -69,7 +73,7 @@ class AgentRuntime:
     ) -> None:
         self.sandbox_manager = sandbox_manager or SandboxManager()
         self.registry = registry or build_default_registry()
-        self.llm = llm or build_chat_client()
+        self.llm = TrackedChatClient(llm or build_chat_client())
         self.prompt_builder = PromptBuilder(self.registry)
         self.context = ContextManager(self.llm)
         self.max_steps = settings.agent_max_steps
@@ -79,6 +83,7 @@ class AgentRuntime:
         issue: IssueInput,
         *,
         clone_url: str | None,
+        repository_archive: bytes | None = None,
         code_search: CodeSearchFn | None = None,
         on_step: StepCallback | None = None,
         should_stop: StopCallback | None = None,
@@ -87,13 +92,18 @@ class AgentRuntime:
         trajectory = Trajectory()
         branch = f"neuraswe/issue-{issue.number}"
 
-        sandbox = await self.sandbox_manager.create(clone_url=clone_url, branch=None)
+        create_kwargs: dict[str, Any] = {"clone_url": clone_url, "branch": None}
+        if repository_archive is not None:
+            create_kwargs["repository_archive"] = repository_archive
+        sandbox = await self._run_cancellable(
+            self.sandbox_manager.create(**create_kwargs), should_stop
+        )
         ctx = ToolContext(sandbox=sandbox, code_search=code_search)
 
         try:
             await self._raise_if_stopped(should_stop)
             # Baseline tests + working branch.
-            baseline = await self._baseline(ctx)
+            baseline = await self._run_cancellable(self._baseline(ctx), should_stop)
             await self._raise_if_stopped(should_stop)
             ctx.baseline_tests = baseline
             await sandbox.exec("git config user.email neuraswe@bot && git config user.name NeuraSWE")
@@ -118,7 +128,9 @@ class AgentRuntime:
                 token_count = self.context.count(system_prompt + user_prompt)
 
                 # REASON + decide ACT (single LLM call returns both).
-                raw = await self.llm.chat(system_prompt, user_prompt, max_tokens=1024)
+                raw = await self._run_cancellable(
+                    self.llm.chat(system_prompt, user_prompt, max_tokens=1024), should_stop
+                )
                 await self._raise_if_stopped(should_stop)
                 parsed = parse_response(raw)
                 thought = parsed.thought or "(no explicit reasoning)"
@@ -142,7 +154,7 @@ class AgentRuntime:
                     parse_failures += 1
                     observation = (
                         f"Could not parse an ACTION ({parsed.parse_error}). "
-                        "Respond with a THOUGHT line and an ACTION line containing JSON."
+                        "Respond with a SUMMARY line and an ACTION line containing JSON."
                     )
                     trajectory.add(
                         TrajectoryStep(step_num, thought, None, observation, token_count=token_count)
@@ -210,7 +222,9 @@ class AgentRuntime:
                 await self._raise_if_stopped(should_stop)
 
                 # ACT
-                result = await self.registry.dispatch(action.tool, ctx, action.args)
+                result = await self._run_cancellable(
+                    self.registry.dispatch(action.tool, ctx, action.args), should_stop
+                )
                 await self._raise_if_stopped(should_stop)
 
                 # Submission gate.
@@ -257,7 +271,9 @@ class AgentRuntime:
         if tool is None:
             return {}
         result = await tool.run(ctx, {})
-        return result.metadata.get("summary", {})
+        return result.metadata.get(
+            "summary", {"classification": "UNEXECUTED", "success": None, "failed_tests": []}
+        )
 
     def _result(
         self,
@@ -281,6 +297,9 @@ class AgentRuntime:
             error_message=error,
             branch=branch,
             duration_ms=int((time.time() - started) * 1000),
+            model_requests=self.llm.request_count,
+            provider_tokens=self.llm.token_count,
+            review_summary=ctx.review_summary,
         )
 
     async def _emit(self, cb: StepCallback | None, payload: dict[str, Any]) -> None:
@@ -293,6 +312,20 @@ class AgentRuntime:
     async def _raise_if_stopped(self, should_stop: StopCallback | None) -> None:
         if should_stop is not None and await should_stop():
             raise AgentRunStopped("Run was stopped by user.")
+
+    async def _run_cancellable(self, awaitable, should_stop: StopCallback | None):  # type: ignore[no-untyped-def]
+        task = asyncio.create_task(awaitable)
+        try:
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=1.0)
+                if done:
+                    break
+                await self._raise_if_stopped(should_stop)
+            return await task
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
     async def _persist_step(
         self,

@@ -34,6 +34,22 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  sandbox-daemon:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    volumes:
+      - sandbox_docker_data:/var/lib/docker
+    networks:
+      - sandbox-control
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   server:
     build:
       context: ./server
@@ -62,6 +78,8 @@ services:
       OLLAMA_TIMEOUT_S: ${OLLAMA_TIMEOUT_S:-180}
       CHROMA_URL: http://chromadb:8000
       CORS_ORIGINS: http://localhost:5173
+      AUTH_REQUIRED: "true"
+      AUTH_TOKENS: ${AUTH_TOKENS:?Set AUTH_TOKENS as token=user}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       GITHUB_PAT: ${GITHUB_PAT:-}
@@ -69,6 +87,7 @@ services:
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-neuraswe-sandbox:latest}
       SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-2048}
       SANDBOX_CPU_CORES: ${SANDBOX_CPU_CORES:-1}
+      SANDBOX_DISK_MB: ${SANDBOX_DISK_MB:-2048}
       SANDBOX_WORKDIR: ${SANDBOX_WORKDIR:-/workspace}
       SANDBOX_USE_LOCAL: ${SANDBOX_USE_LOCAL:-false}
       NODE_ENV: production
@@ -79,8 +98,6 @@ services:
         condition: service_started
       chromadb:
         condition: service_started
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # sibling sandbox containers
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 3001"
@@ -96,6 +113,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://neuraswe:neuraswe@postgres:5432/neuraswe
       REDIS_URL: redis://redis:6379
+      AUTH_REQUIRED: "true"
+      AUTH_TOKENS: ${AUTH_TOKENS:?Set AUTH_TOKENS as token=user}
       WORKER_MAX_JOBS: ${WORKER_MAX_JOBS:-2}
       WORKER_JOB_TIMEOUT_S: ${WORKER_JOB_TIMEOUT_S:-900}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai-compatible}
@@ -115,20 +134,28 @@ services:
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-neuraswe-sandbox:latest}
       SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-2048}
       SANDBOX_CPU_CORES: ${SANDBOX_CPU_CORES:-1}
+      SANDBOX_DISK_MB: ${SANDBOX_DISK_MB:-2048}
       SANDBOX_WORKDIR: ${SANDBOX_WORKDIR:-/workspace}
       SANDBOX_USE_LOCAL: ${SANDBOX_USE_LOCAL:-false}
+      SANDBOX_ALLOW_UNSAFE_LOCAL: "false"
+      SANDBOX_NETWORK_MODE: ${SANDBOX_NETWORK_MODE:-none}
+      DOCKER_HOST: tcp://sandbox-daemon:2375
       NODE_ENV: production
     depends_on:
       - server
       - redis
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox-daemon
+    networks:
+      - default
+      - sandbox-control
     command: arq app.queue.worker.WorkerSettings
 
   client:
     build:
       context: ./client
       dockerfile: Dockerfile
+      args:
+        VITE_API_TOKEN: ${VITE_API_TOKEN:?Set VITE_API_TOKEN to a token listed in AUTH_TOKENS}
     ports:
       - "5173:80"
     depends_on:
@@ -138,3 +165,8 @@ volumes:
   pgdata:
   chromadata:
   ollama_data:
+  sandbox_docker_data:
+
+networks:
+  sandbox-control:
+    internal: true

@@ -5,7 +5,7 @@ import { deleteFailedRuns, deleteRun, stopActiveRuns, stopRun, useRuns } from ".
 import { StatusBadge } from "../components/StatusBadge";
 import type { RunStatus } from "../types";
 
-const STATUSES: (RunStatus | "")[] = ["", "QUEUED", "RUNNING", "SOLVED", "FAILED", "TIMEOUT"];
+const STATUSES: (RunStatus | "")[] = ["", "QUEUED", "IMPLEMENTING", "VALIDATING", "AWAITING_APPROVAL", "PR_CREATING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"];
 
 export function RunsList() {
   const [status, setStatus] = useState<string>("");
@@ -152,7 +152,7 @@ export function RunsList() {
                   )}
                 </td>
                 <td className="px-5 py-3">
-                  {r.status === "QUEUED" || r.status === "RUNNING" ? (
+                  {!["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "REJECTED", "SOLVED", "TIMEOUT", "AWAITING_APPROVAL"].includes(r.status) ? (
                     <button
                       disabled={stopOne.isPending}
                       onClick={() => {

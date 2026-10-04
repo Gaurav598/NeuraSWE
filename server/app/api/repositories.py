@@ -21,6 +21,7 @@ from app.db.schemas import (
 )
 from app.github.client import GitHubClient
 from app.indexer.orchestrator import IndexOrchestrator
+from app.security.auth import Principal, current_principal, require_owner
 from app.utils.logger import get_logger
 
 log = get_logger("api.repositories")
@@ -34,28 +35,45 @@ class ConnectRepoRequest(BaseModel):
 
 
 @router.get("", response_model=list[RepositoryOut])
-async def list_repositories(session: AsyncSession = Depends(get_session)) -> list[RepositoryOut]:
-    repos = await crud.list_repositories(session)
+async def list_repositories(
+    session: AsyncSession = Depends(get_session), principal: Principal = Depends(current_principal)
+) -> list[RepositoryOut]:
+    repos = await crud.list_repositories(session, owner_id=principal.user_id)
     return [RepositoryOut.model_validate(r) for r in repos]
 
 
 @router.post("", response_model=RepositoryOut, status_code=201)
 async def connect_repository(
-    req: ConnectRepoRequest, session: AsyncSession = Depends(get_session)
+    req: ConnectRepoRequest, session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ) -> RepositoryOut:
+    gh = GitHubClient(installation_id=req.installation_id)
+    try:
+        metadata = await gh.get_repository(req.owner, req.name)
+        permissions = metadata.get("permissions") or {}
+        can_push = bool(
+            permissions.get("push") or permissions.get("admin") or permissions.get("maintain")
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=403, detail="Repository is not accessible with the configured GitHub integration") from exc
     repo = await crud.upsert_repository(
-        session, owner=req.owner, name=req.name, installation_id=req.installation_id
+        session, owner=req.owner, name=req.name, installation_id=req.installation_id,
+        owner_id=principal.user_id,
     )
+    config = dict(repo.config or {})
+    config.update({"integration_state": "connected", "can_push": can_push, "private": bool(metadata.get("private"))})
+    repo.config = config
     await session.commit()
     asyncio.create_task(_index_repo(repo.id, repo.owner, repo.name, repo.installation_id))
     return RepositoryOut.model_validate(repo)
 
 
 @router.post("/{repo_id}/reindex", status_code=202)
-async def reindex(repo_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def reindex(repo_id: str, session: AsyncSession = Depends(get_session), principal: Principal = Depends(current_principal)) -> dict:
     repo = await crud.get_repository(session, repo_id)
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found")
+    require_owner(repo.owner_id, principal)
     asyncio.create_task(_index_repo(repo.id, repo.owner, repo.name, repo.installation_id))
     return {"status": "indexing_started", "repo_id": repo_id}
 
@@ -67,10 +85,12 @@ async def list_repository_issues(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ) -> PaginatedGitHubIssues:
     repo = await crud.get_repository(session, repo_id)
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found")
+    require_owner(repo.owner_id, principal)
 
     gh = GitHubClient(installation_id=repo.installation_id)
     try:
@@ -104,11 +124,13 @@ async def list_repository_issues(
 
 @router.patch("/{repo_id}/config", response_model=RepositoryOut)
 async def update_config(
-    repo_id: str, body: RepoConfigUpdate, session: AsyncSession = Depends(get_session)
+    repo_id: str, body: RepoConfigUpdate, session: AsyncSession = Depends(get_session),
+    principal: Principal = Depends(current_principal),
 ) -> RepositoryOut:
     repo = await crud.get_repository(session, repo_id)
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found")
+    require_owner(repo.owner_id, principal)
     config = dict(repo.config or {})
     config.update({k: v for k, v in body.model_dump().items() if v is not None})
     repo.config = config
@@ -133,13 +155,20 @@ async def _index_repo(repo_id: str, owner: str, name: str, installation_id: int 
             await crud.set_index_status(s, repo, IndexStatus.INDEXING)
             await s.commit()
     try:
-        stats = await indexer.index_repository(repo_id, clone_url)
+        async def progress(done: int, total: int) -> None:
+            async with SessionLocal() as progress_session:
+                current = await crud.get_repository(progress_session, repo_id)
+                if current:
+                    current.indexing_progress = int(done * 100 / max(total, 1))
+                    await progress_session.commit()
+
+        stats = await indexer.index_repository(repo_id, clone_url, progress=progress)
         async with SessionLocal() as s:
             repo = await crud.get_repository(s, repo_id)
             if repo:
                 await crud.set_index_status(
                     s, repo, IndexStatus.READY,
-                    files_indexed=stats["files"], last_indexed_sha=stats["sha"],
+                    files_indexed=stats["files"], last_indexed_sha=stats["sha"], indexing_progress=100,
                 )
                 await s.commit()
     except Exception as exc:
@@ -147,7 +176,7 @@ async def _index_repo(repo_id: str, owner: str, name: str, installation_id: int 
         async with SessionLocal() as s:
             repo = await crud.get_repository(s, repo_id)
             if repo:
-                await crud.set_index_status(s, repo, IndexStatus.FAILED)
+                await crud.set_index_status(s, repo, IndexStatus.FAILED, index_error=str(exc)[:2000])
                 await s.commit()
 
 

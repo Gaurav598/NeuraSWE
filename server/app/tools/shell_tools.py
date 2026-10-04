@@ -7,7 +7,7 @@ import re
 import shlex
 from typing import Any
 
-from app.tools.base import Tool, ToolContext, ToolResult
+from app.tools.base import Tool, ToolContext, ToolPermission, ToolResult
 
 BLOCKED_COMMAND_PATTERNS = [
     "rm -rf /",
@@ -23,6 +23,21 @@ BLOCKED_COMMAND_PATTERNS = [
     "reboot",
     "curl | bash",
     "wget | bash",
+    "curl ",
+    "wget ",
+    "nc ",
+    "ssh ",
+    "scp ",
+    "env",
+    "printenv",
+    "/etc/",
+    "/proc/",
+    "/sys/",
+    "../",
+    "$home",
+    "${home",
+    "$(",
+    "`",
 ]
 
 SOURCE_GLOB = "*.{ts,tsx,js,jsx,py,java,go,rs,cpp,cc,c,h,hpp,rb,php,cs,kt,swift}"
@@ -35,10 +50,13 @@ class GrepTool(Tool):
         "Exact text/regex search across source files. Use for specific symbols, "
         "imports, or error messages. Optionally scope to a path."
     )
+    argument_types = {"pattern": str, "path": str}
+    required_arguments = {"pattern"}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         pattern = self._require(args, "pattern")
         path = args.get("path") or "."
+        ctx.sandbox.validate_path(path)
         cmd = (
             f"grep -PrnI --include='{SOURCE_GLOB}' "
             f"--exclude-dir=node_modules --exclude-dir=.git "
@@ -58,11 +76,20 @@ class RunCommandTool(Tool):
         "Run a shell command in the repo directory (install deps, run scripts, check "
         "versions). Destructive commands are blocked."
     )
+    permission = ToolPermission.SHELL
+    argument_types = {"command": str}
+    required_arguments = {"command"}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         command = self._require(args, "command")
         lowered = command.lower()
-        if any(b in lowered for b in BLOCKED_COMMAND_PATTERNS):
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return ToolResult(error="Command has invalid shell quoting.")
+        if any(b in lowered for b in BLOCKED_COMMAND_PATTERNS) or any(
+            token.startswith("/") for token in tokens
+        ):
             return ToolResult(error="Command blocked for safety.")
         res = await ctx.sandbox.exec(command, timeout=60)
         out = res.stdout[:3000]
@@ -75,9 +102,13 @@ class RunCommandTool(Tool):
 class RunTestsTool(Tool):
     name = "run_tests"
     description = "Run the project's test suite (auto-detected). Optionally target a test path."
+    permission = ToolPermission.SHELL
+    argument_types = {"test_path": str}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         test_path = args.get("test_path")
+        if test_path:
+            ctx.sandbox.validate_path(test_path)
         cmd = await self._detect_command(ctx, test_path)
         if cmd is None:
             return ToolResult(error="Could not detect a test runner for this project.")
@@ -148,6 +179,8 @@ class RunTestsTool(Tool):
 class GitDiffTool(Tool):
     name = "git_diff"
     description = "Show the current diff of changes made so far."
+    permission = ToolPermission.GIT_MUTATION
+    argument_types = {}
 
     async def run(self, ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         res = await ctx.sandbox.exec("git add -A && git diff --cached")
@@ -173,11 +206,23 @@ def _parse_test_summary(text: str, exit_code: int) -> dict[str, Any]:
     if failed is None:
         m = re.search(r"(\d+)\s+fail", text, re.IGNORECASE)
         failed = int(m.group(1)) if m else None
+    failed_tests = sorted(set(re.findall(r"^FAILED\s+([^\s]+)", text, re.MULTILINE)))
+    lowered = text.lower()
+    if exit_code == 124 or "timed out" in lowered:
+        classification = "TIMEOUT"
+    elif exit_code in {126, 127} or "command not found" in lowered or "no module named pytest" in lowered:
+        classification = "INFRASTRUCTURE_FAILURE"
+    elif exit_code == 0:
+        classification = "PASS"
+    else:
+        classification = "TEST_FAILURE"
     return {
         "passed": passed if passed is not None else "?",
         "failed": failed if failed is not None else (0 if exit_code == 0 else "?"),
         "success": exit_code == 0,
         "exit_code": exit_code,
+        "classification": classification,
+        "failed_tests": failed_tests,
     }
 
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft, GitPullRequest, Radio } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { deleteRun, stopRun, useRun } from "../api/client";
+import { deleteRun, reviewRun, stopRun, useRun } from "../api/client";
 import { useLiveRun } from "../socket/useSocket";
 import { StatusBadge } from "../components/StatusBadge";
 import { ReasoningTimeline } from "../components/timeline/ReasoningTimeline";
@@ -37,29 +37,41 @@ export function RunDetail() {
     },
     onError: (error: any) => setActionError(error?.response?.data?.detail || "Unable to delete run."),
   });
+  const review = useMutation({
+    mutationFn: (decision: "APPROVE" | "REJECT" | "REQUEST_CHANGES") => reviewRun(id!, decision),
+    onSuccess: () => {
+      setActionError(null);
+      queryClient.invalidateQueries({ queryKey: ["run", id] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      refetch();
+    },
+    onError: (error: any) => setActionError(error?.response?.data?.detail || "Unable to record review decision."),
+  });
 
   // Refetch persisted run whenever a step completes or the run finishes.
-  const observeCount = events.filter((e) => e.type === "observe").length;
   useEffect(() => {
-    if (observeCount > 0 || completed) refetch();
-  }, [observeCount, completed, refetch]);
+    if (events.length > 0 || completed) refetch();
+  }, [events.length, completed, refetch]);
 
   if (isLoading || !run) {
     return <div className="text-slate-500">Loading run…</div>;
   }
 
-  const touchedFiles = Array.from(
-    new Set(
-      run.steps
-        .filter((s) => s.tool_name === "edit_file" || s.tool_name === "create_file")
-        .map((s) => (s.tool_args as any)?.path)
-        .filter(Boolean)
-    )
-  );
+  const reviewedFiles = Array.isArray(run.review_summary?.modified_files)
+    ? run.review_summary.modified_files.map(String)
+    : [];
+  const touchedFiles = Array.from(new Set([
+    ...reviewedFiles,
+    ...run.steps
+      .filter((s) => s.tool_name === "edit_file" || s.tool_name === "create_file")
+      .map((s) => (s.tool_args as any)?.path)
+      .filter(Boolean),
+  ]));
 
   const lastDiffStep = [...run.steps].reverse().find((s) => s.tool_name === "git_diff");
-  const diff = lastDiffStep?.observation || "";
-  const isLive = run.status === "RUNNING" || run.status === "QUEUED";
+  const diff = run.patch_diff || lastDiffStep?.observation || "";
+  const terminal = ["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "REJECTED", "SOLVED", "TIMEOUT"].includes(run.status);
+  const isLive = !terminal && run.status !== "AWAITING_APPROVAL";
   const visibleStepCount = Math.max(run.total_steps, run.steps.length);
 
   return (
@@ -125,7 +137,12 @@ export function RunDetail() {
               <div>Source: {run.source === "jira" ? "Jira" : "GitHub"}</div>
               <div>Model: {run.model || "—"}</div>
               <div>Steps: {visibleStepCount}</div>
+              <div>Model requests: {run.model_requests}</div>
+              <div>Tokens: {run.total_tokens || "—"}</div>
+              <div>Estimated cost: {run.estimated_cost == null ? "not reported" : `$${run.estimated_cost.toFixed(4)}`}</div>
               <div>Duration: {run.duration_ms ? `${(run.duration_ms / 1000).toFixed(1)}s` : "—"}</div>
+              <div>Approval: {run.approval_status}</div>
+              <div>PR: {run.pr_status}</div>
             </div>
             {run.external_issue_url && (
               <a
@@ -151,6 +168,16 @@ export function RunDetail() {
                 <GitPullRequest className="h-4 w-4" /> View PR #{run.pr_number}
               </a>
             )}
+            {run.status === "AWAITING_APPROVAL" && (
+              <div className="mt-4 space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                <div className="text-xs font-medium text-amber-200">Human review required before publication</div>
+                <div className="flex flex-wrap gap-2">
+                  <button disabled={review.isPending} onClick={() => review.mutate("APPROVE")} className="rounded-md bg-green-500/20 px-3 py-1.5 text-xs text-green-300 disabled:opacity-40">Approve & create PR</button>
+                  <button disabled={review.isPending} onClick={() => review.mutate("REQUEST_CHANGES")} className="rounded-md bg-amber-500/20 px-3 py-1.5 text-xs text-amber-200 disabled:opacity-40">Request changes</button>
+                  <button disabled={review.isPending} onClick={() => review.mutate("REJECT")} className="rounded-md bg-red-500/20 px-3 py-1.5 text-xs text-red-300 disabled:opacity-40">Reject</button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="rounded-xl border border-line bg-panel p-5">
@@ -158,13 +185,30 @@ export function RunDetail() {
             <TestRow label="Baseline" data={run.baseline_tests} />
             <TestRow label="After fix" data={run.final_tests} />
           </div>
+          {run.review_summary && (
+            <div className="rounded-xl border border-line bg-panel p-5 text-xs text-slate-400">
+              <h3 className="mb-3 text-sm font-medium text-slate-300">Review evidence</h3>
+              <div className="space-y-2">
+                <div><span className="text-slate-500">Root cause:</span> {String(run.review_summary.root_cause || "Not recorded")}</div>
+                <div><span className="text-slate-500">Solution:</span> {String(run.review_summary.proposed_solution || "Not recorded")}</div>
+                <EvidenceList label="Risks" value={run.review_summary.risks} />
+                <EvidenceList label="Limitations" value={run.review_summary.limitations} />
+                <EvidenceList label="Tests not executed" value={run.review_summary.tests_not_executed} />
+                <ValidationComparison value={run.review_summary.validation_comparison} />
+                <div>
+                  <span className="text-slate-500">Tokens:</span> {run.review_summary.token_usage ?? "—"}
+                  {run.review_summary.token_usage_source === "estimated_prompt" ? " (estimated prompt)" : ""}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Center: reasoning timeline */}
+        {/* Center: operational timeline */}
         <div className="min-w-0 space-y-5">
           <AgentActivity steps={run.steps} live={events} />
           <div className="rounded-xl border border-line bg-panel p-5">
-            <h3 className="mb-4 text-sm font-medium text-slate-300">Reasoning trace</h3>
+            <h3 className="mb-4 text-sm font-medium text-slate-300">Operational timeline</h3>
             <ReasoningTimeline steps={run.steps} live={events} />
           </div>
         </div>
@@ -190,8 +234,27 @@ function TestRow({ label, data }: { label: string; data: Record<string, any> | n
     <div className="flex items-start justify-between gap-3 py-1 text-xs">
       <span className="shrink-0 text-slate-500">{label}</span>
       <span className="break-words text-right text-slate-300">
-        {data ? `${data.passed ?? "?"} pass / ${data.failed ?? 0} fail` : "—"}
+        {data ? `${data.classification || "UNKNOWN"} · ${data.passed ?? "?"} pass / ${data.failed ?? 0} fail` : "—"}
       </span>
+    </div>
+  );
+}
+
+function EvidenceList({ label, value }: { label: string; value: unknown }) {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return <div><span className="text-slate-500">{label}:</span> {value.map(String).join("; ")}</div>;
+}
+
+function ValidationComparison({ value }: { value: unknown }) {
+  if (!value || typeof value !== "object") return null;
+  const comparison = value as Record<string, any>;
+  return (
+    <div>
+      <span className="text-slate-500">Regression:</span>{" "}
+      {comparison.regression ? "detected" : "not detected"}
+      {Array.isArray(comparison.new_failures) && comparison.new_failures.length > 0
+        ? ` · new: ${comparison.new_failures.join(", ")}`
+        : ""}
     </div>
   );
 }

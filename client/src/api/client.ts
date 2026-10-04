@@ -5,6 +5,8 @@ import type { PaginatedGitHubIssues, PaginatedRuns, RunDetail, Repository, Stats
 const API_URL = import.meta.env.VITE_API_URL || "";
 
 export const api = axios.create({ baseURL: API_URL });
+const apiToken = import.meta.env.VITE_API_TOKEN || "";
+if (apiToken) api.defaults.headers.common.Authorization = `Bearer ${apiToken}`;
 
 export function useStats() {
   return useQuery<Stats>({
@@ -27,6 +29,9 @@ export function useRun(runId: string | undefined) {
     queryKey: ["run", runId],
     queryFn: async () => (await api.get(`/api/runs/${runId}`)).data,
     enabled: !!runId,
+    // Socket events reduce latency; polling remains the authoritative fallback
+    // after reconnects, event persistence failures, or browser sleep.
+    refetchInterval: 5000,
   });
 }
 
@@ -56,6 +61,16 @@ export async function triggerManualRun(repo_id: string, issue_number: number) {
 
 export async function stopRun(runId: string) {
   return (await api.post(`/api/runs/${runId}/stop`)).data;
+}
+
+export async function reviewRun(runId: string, decision: "APPROVE" | "REJECT" | "REQUEST_CHANGES", comment = "") {
+  return (await api.post(`/api/runs/${runId}/review`, { decision, comment })).data;
+}
+
+export async function getRunEvents(runId: string, afterSequence = 0) {
+  return (await api.get(`/api/runs/${runId}/events`, { params: { after_sequence: afterSequence } })).data as Array<{
+    sequence: number; event_type: string; payload: Record<string, any>; created_at: string;
+  }>;
 }
 
 export async function stopActiveRuns() {

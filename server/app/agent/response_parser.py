@@ -14,7 +14,9 @@ from dataclasses import dataclass
 
 from app.agent.types import Action
 
-_THOUGHT_RE = re.compile(r"THOUGHT:\s*(.*?)(?:\nACTION:|\Z)", re.IGNORECASE | re.DOTALL)
+_THOUGHT_RE = re.compile(
+    r"(?:SUMMARY|THOUGHT):\s*(.*?)(?:\nACTION:|\Z)", re.IGNORECASE | re.DOTALL
+)
 _ACTION_RE = re.compile(r"ACTION:\s*(.*)", re.IGNORECASE | re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -52,10 +54,10 @@ def parse_response(text: str) -> ParsedResponse:
 
 def _parsed_json_mode_response(obj: dict) -> ParsedResponse | None:
     if isinstance(obj.get("action"), dict):
-        thought = str(obj.get("thought") or "").strip()
+        thought = str(obj.get("summary") or obj.get("thought") or "").strip()
         return _parsed_action_object(thought, obj["action"])
     if obj.get("tool") or obj.get("name"):
-        thought = str(obj.get("thought") or "").strip()
+        thought = str(obj.get("summary") or obj.get("thought") or "").strip()
         return _parsed_action_object(thought, obj)
     return None
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from app.config import settings
 from app.db.base import engine
 from app.db.schemas import HealthOut
+from app.metrics import snapshot
+from app.security.auth import Principal, current_principal
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
@@ -24,6 +26,11 @@ async def health() -> HealthOut:
     }
     status = "ok" if all(services.values()) else "degraded"
     return HealthOut(status=status, services=services)
+
+
+@router.get("/metrics")
+async def metrics(_principal: Principal = Depends(current_principal)) -> dict[str, int]:
+    return await snapshot()
 
 
 async def _check_db() -> bool:
